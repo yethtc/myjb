@@ -716,8 +716,8 @@ cat >> "$HOME/agsbx/xr.json" <<EOF
             "auth": "password",
              "accounts": [
                {
-               "user": "123",
-               "pass": "456"
+               "user": 123,
+               "pass": 456
                }
             ],
             "udp": true
