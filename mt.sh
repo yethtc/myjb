@@ -2,6 +2,7 @@
 # ==============================================
 # 一键部署脚本 | 改编自 ellermister/mtproxy.sh
 # 兼容：有systemd（真机） / 无systemd（docker容器）Debian/Ubuntu
+# 【修复版】彻底消除 timedatectl / systemctl 不存在时报错
 # ==============================================
 
 # =====================【改这里：项目基础信息】=====================
@@ -57,7 +58,7 @@ check_arch() {
     info "检测架构: ${BIN_ARCH}"
 }
 
-# 时间同步：增加判断，没有timedatectl直接跳过，不再报错
+# 时间同步：修复！不存在timedatectl时一行都不执行
 check_time() {
     info "检测系统时间同步状态"
     if command -v timedatectl &>/dev/null; then
@@ -70,7 +71,7 @@ check_time() {
             info "系统时间同步正常"
         fi
     else
-        warn "当前环境无 timedatectl，跳过时间同步检测（容器环境）"
+        warn "当前环境无 timedatectl，跳过时间同步检测（容器环境），校时命令示例：date -s '2026-10-23 15:00:00'"
     fi
 }
 
@@ -102,7 +103,7 @@ EOF
     fi
 }
 
-# 生成systemd服务单元（仅systemd环境调用）
+# 生成systemd服务单元（仅在确认有systemctl的时候才调用！）
 gen_systemd() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
@@ -125,6 +126,7 @@ EOF
 start() {
     check_root
     if command -v systemctl &>/dev/null; then
+        info "检测到 systemd 环境，生成服务单元"
         gen_systemd
         systemctl start ${SERVICE_NAME}
         sleep 0.5
@@ -201,7 +203,7 @@ status() {
     fi
 }
 
-# 安装流程
+# 安装流程【重点：安装阶段不再碰systemd！】
 install() {
     check_root
     check_arch
