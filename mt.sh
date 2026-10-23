@@ -1,8 +1,7 @@
 #!/bin/bash
 # ==============================================
 # 一键部署脚本 | 改编自 ellermister/mtproxy.sh
-# 适配 Debian / Ubuntu
-# Author: Modified
+# 兼容：有systemd（真机） / 无systemd（docker容器）Debian/Ubuntu
 # ==============================================
 
 # =====================【改这里：项目基础信息】=====================
@@ -12,6 +11,8 @@ BIN_NAME="myweb"
 BIN_RELEASE_URL="https://github.com/xxx/xxx/releases/download/v1.0.0/myweb-linux-amd64"
 CONFIG_FILE="/etc/${SERVICE_NAME}/config.conf"
 INSTALL_DIR="/usr/local/${SERVICE_NAME}"
+PID_FILE="${INSTALL_DIR}/${SERVICE_NAME}.pid"
+LOG_FILE="${INSTALL_DIR}/${SERVICE_NAME}.log"
 # =================================================================
 
 # 颜色定义（和原版mtproxy.sh保持一致）
@@ -56,16 +57,20 @@ check_arch() {
     info "检测架构: ${BIN_ARCH}"
 }
 
-# 时间同步（替换原版ntpdate，兼容新版Debian）
+# 时间同步：增加判断，没有timedatectl直接跳过，不再报错
 check_time() {
     info "检测系统时间同步状态"
-    timedatectl set-ntp true
-    sleep 1
-    TIME_SYNC=$(timedatectl | grep "System clock synchronized:" | awk '{print $4}')
-    if [[ "${TIME_SYNC}" != "yes" ]]; then
-        warn "时间同步暂时未就绪，若后续下载失败请手动校准时间：timedatectl set-timezone Asia/Shanghai"
+    if command -v timedatectl &>/dev/null; then
+        timedatectl set-ntp true
+        sleep 1
+        TIME_SYNC=$(timedatectl | grep "System clock synchronized:" | awk '{print $4}')
+        if [[ "${TIME_SYNC}" != "yes" ]]; then
+            warn "时间同步暂时未就绪，若后续下载失败请手动校准时间"
+        else
+            info "系统时间同步正常"
+        fi
     else
-        info "系统时间同步正常"
+        warn "当前环境无 timedatectl，跳过时间同步检测（容器环境）"
     fi
 }
 
@@ -97,7 +102,7 @@ EOF
     fi
 }
 
-# 生成systemd服务单元
+# 生成systemd服务单元（仅systemd环境调用）
 gen_systemd() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
@@ -116,6 +121,86 @@ EOF
     systemctl daemon-reload
 }
 
+# ============ 启动逻辑：自动分支 ============
+start() {
+    check_root
+    if command -v systemctl &>/dev/null; then
+        gen_systemd
+        systemctl start ${SERVICE_NAME}
+        sleep 0.5
+        if systemctl is-active --quiet ${SERVICE_NAME}; then
+            info "${SERVICE_NAME} 启动成功（systemd）"
+        else
+            error "${SERVICE_NAME} 启动失败，请查看日志：journalctl -u ${SERVICE_NAME}"
+        fi
+    else
+        # 无systemd容器环境：nohup后台
+        if [[ -f ${PID_FILE} ]]; then
+            local oldpid=$(cat ${PID_FILE})
+            if kill -0 ${oldpid} 2>/dev/null; then
+                warn "程序已经在运行，pid: ${oldpid}"
+                return
+            fi
+            rm -f ${PID_FILE}
+        fi
+        info "使用 nohup 后台启动（无systemd容器环境）"
+        nohup ${INSTALL_DIR}/${BIN_NAME} -c ${CONFIG_FILE} > ${LOG_FILE} 2>&1 &
+        echo $! > ${PID_FILE}
+        sleep 0.5
+        info "${SERVICE_NAME} 启动成功，pid=$(cat ${PID_FILE})，日志：${LOG_FILE}"
+    fi
+}
+
+# 停止
+stop() {
+    check_root
+    if command -v systemctl &>/dev/null; then
+        systemctl stop ${SERVICE_NAME}
+        info "${SERVICE_NAME} 已停止（systemd）"
+    else
+        if [[ -f ${PID_FILE} ]]; then
+            local pid=$(cat ${PID_FILE})
+            if kill -0 ${pid} 2>/dev/null; then
+                kill ${pid}
+                sleep 0.3
+                kill -0 ${pid} 2>/dev/null && kill -9 ${pid}
+            fi
+            rm -f ${PID_FILE}
+            info "${SERVICE_NAME} 已停止"
+        else
+            warn "没有找到运行pid"
+        fi
+    fi
+}
+
+# 重启
+restart() {
+    check_root
+    stop
+    sleep 0.5
+    start
+}
+
+# 状态查看
+status() {
+    check_root
+    if command -v systemctl &>/dev/null; then
+        systemctl status ${SERVICE_NAME}
+    else
+        if [[ -f ${PID_FILE} ]]; then
+            local pid=$(cat ${PID_FILE})
+            if kill -0 ${pid} 2>/dev/null; then
+                info "运行中，pid: ${pid}"
+            else
+                warn "pid文件存在，但进程已经退出"
+                rm -f ${PID_FILE}
+            fi
+        else
+            warn "程序未运行"
+        fi
+    fi
+}
+
 # 安装流程
 install() {
     check_root
@@ -123,41 +208,8 @@ install() {
     check_time
     download_bin
     gen_config
-    gen_systemd
     info "安装完成！"
     info "启动命令：$0 start"
-}
-
-# 启动
-start() {
-    check_root
-    systemctl start ${SERVICE_NAME}
-    sleep 0.5
-    if systemctl is-active --quiet ${SERVICE_NAME}; then
-        info "${SERVICE_NAME} 启动成功"
-    else
-        error "${SERVICE_NAME} 启动失败，请查看日志：journalctl -u ${SERVICE_NAME}"
-    fi
-}
-
-# 停止
-stop() {
-    check_root
-    systemctl stop ${SERVICE_NAME}
-    info "${SERVICE_NAME} 已停止"
-}
-
-# 重启
-restart() {
-    check_root
-    systemctl restart ${SERVICE_NAME}
-    info "${SERVICE_NAME} 已重启"
-}
-
-# 状态
-status() {
-    check_root
-    systemctl status ${SERVICE_NAME}
 }
 
 # 卸载
@@ -169,12 +221,14 @@ uninstall() {
         info "取消卸载"
         exit 0
     fi
-    systemctl stop ${SERVICE_NAME}
-    systemctl disable ${SERVICE_NAME}
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
+    stop
+    if command -v systemctl &>/dev/null; then
+        systemctl disable ${SERVICE_NAME}
+        rm -f /etc/systemd/system/${SERVICE_NAME}.service
+        systemctl daemon-reload
+    fi
     rm -rf ${INSTALL_DIR}
     rm -f ${CONFIG_FILE}
-    systemctl daemon-reload
     info "卸载完成"
 }
 
